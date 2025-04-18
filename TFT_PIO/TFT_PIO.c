@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include "pico/stdlib.h"
 #include <math.h>
-#include "hardware/gpio.h"
+#include "hardware/gpio.h"  
 #include "pico/time.h"
 #include "hardware/irq.h"
 #include "hardware/pwm.h"
@@ -12,22 +12,35 @@
 #include <string.h>
 #include <pico/multicore.h>
 #include "pt_cornell_rp2040_v1_3.h"
-
+#include <hardware/gpio.h>
 
 // Snake Arena 
-#define CELL_SIZE 6
+#define CELL_SIZE 10
+#define STATUS_PIXELS   20                     // height of score bar
 #define GRID_WIDTH  (ILI9340_TFTWIDTH / CELL_SIZE)
 #define GRID_HEIGHT (ILI9340_TFTHEIGHT / CELL_SIZE)
 #define MAX_SNAKE_LENGTH (GRID_WIDTH * GRID_HEIGHT)
-
 // Define GPIO pins for the direction buttons (adjust as needed for your wiring)
-#define BUTTON_UP     7
-#define BUTTON_LEFT   8
-#define BUTTON_RIGHT  6
-#define BUTTON_DOWN   9
-
-// Sound Design 
+#define BUTTON_UP      6  //7  
+#define BUTTON_LEFT    7  //8  
+#define BUTTON_RIGHT   9  //6
+#define BUTTON_DOWN    8  //9 
 #define SPEAKER_PIN   19    
+
+// volatile flags set inside the ISR
+volatile bool up_pressed = false;
+volatile bool left_pressed = false;
+volatile bool right_pressed = false;
+volatile bool down_pressed = false;
+
+// timers and indices
+static repeating_timer_t menu_timer, bg_timer;
+static int               menu_idx = -1, bg_idx = -1;
+static bool              menu_playing = false, bg_playing = false;
+
+static int screen_w, screen_h;
+static int playable_h, grid_w, grid_h;
+
 
 // Point structure to represent positions on the grid
 typedef struct {
@@ -40,10 +53,35 @@ typedef struct {
     uint32_t dur_ms;    // duration in milliseconds
 } note_t;
 
+
+// background_tune[] & background_tune_len you defined earlier
+extern const int     background_tune_len;
+
+static const note_t background_tune[] = {
+    {262, 300},  // C4
+    {294, 300},  // D4
+    {330, 300},  // E4
+    {349, 300},  // F4
+    {392, 600},  // G4
+};
+
+static const note_t menu_tune[] = {
+    {523, 300},  // C5
+    {659, 300},  // E5
+    {784, 300},  // G5
+    {523, 300},  // C5 (octave loop)
+    {880, 300},  // A5
+    {784, 300},  // G5
+    {659, 300},  // E5
+    {523, 600},  // C5 hold
+    {0,   200},  // rest before looping
+};
+static int bg_note_index = 0;
+static const int menu_tune_len = sizeof(menu_tune)/sizeof(menu_tune[0]);
+
+
 // Enum for the four movement directions.
-typedef enum {
-    UP, DOWN, LEFT, RIGHT
-} Direction;
+typedef enum {UP, DOWN, LEFT, RIGHT} Direction;
 
 // Enum for the overall game states.
 typedef enum {
@@ -53,10 +91,12 @@ typedef enum {
 } GameState;
 
 static GameState game_state;    // Game state variable
+static GameState prev_state;
 static int score = 0;           // Private variable to track the score
+static int high_score = 0;
 
 // Global game variables
-Point snake[MAX_SNAKE_LENGTH];  // Array holding positions of the snake segments
+Point snake[MAX_SNAKE_LENGTH]; // Array holding positions of the snake segments
 int snake_length;               // Current length of the snake
 Direction current_direction;    // The snake's current moving direction
 Point food;                     // Position of the food
@@ -71,11 +111,28 @@ void start_screen();
 void end_screen();
 bool any_button_pressed();
 
+// Interrupt-driven input callback
+void gpio_callback(uint gpio, uint32_t events) {
+    // on falling edge
+    if (gpio == BUTTON_UP && current_direction != DOWN)    current_direction = UP;
+    if (gpio == BUTTON_DOWN && current_direction != UP)    current_direction = DOWN;
+    if (gpio == BUTTON_LEFT && current_direction != RIGHT) current_direction = LEFT;
+    if (gpio == BUTTON_RIGHT && current_direction != LEFT) current_direction = RIGHT;
+}
+
 // Helper: Return true if any button is pressed.
 bool any_button_pressed() {
     return (!gpio_get(BUTTON_UP) || !gpio_get(BUTTON_DOWN) ||
             !gpio_get(BUTTON_LEFT) || !gpio_get(BUTTON_RIGHT));
 }
+
+void calculate_grid() {
+    screen_w    = tft_width();
+    screen_h    = tft_height();
+    playable_h  = screen_h - STATUS_PIXELS;
+    grid_w      = screen_w  / CELL_SIZE;
+    grid_h      = playable_h / CELL_SIZE;
+  }
 
 // Display the start screen.
 void start_screen() {
@@ -93,31 +150,72 @@ void end_screen() {
     tft_fillScreen(ILI9340_BLACK);
     tft_setTextColor(ILI9340_WHITE);
     tft_setTextSize(4);
-    tft_setCursor(ILI9340_TFTWIDTH/ 2 - 65, ILI9340_TFTHEIGHT / 2 - 80);
+    tft_setCursor(ILI9340_TFTWIDTH/ 2 - 65, ILI9340_TFTHEIGHT / 2 - 140);
     tft_writeString("Game Over");
-    tft_setTextSize(3);
-    // Format the final score as a string.
-    sprintf(score_text, "Score: %d", score);
-    tft_setCursor(ILI9340_TFTWIDTH/ 2 - 30, ILI9340_TFTHEIGHT / 2 - 40);
-    tft_writeString(score_text);
+    tft_setTextSize(2.5);
+    if(score > high_score){
+        high_score = score;
+        tft_setTextColor(ILI9340_RED);
+        sprintf(score_text, "New High Score!");
+        tft_setCursor(ILI9340_TFTWIDTH/ 2 - 50, ILI9340_TFTHEIGHT / 2 - 80);
+        tft_writeString(score_text);
+        sprintf(score_text, "Score: %d", score);
+        tft_setCursor(ILI9340_TFTWIDTH/ 2 - 10, ILI9340_TFTHEIGHT / 2 - 40);
+        tft_writeString(score_text);
+        tft_setTextColor(ILI9340_WHITE);
+    }// Format the final score as a string.
+    else{
+        sprintf(score_text, "High Score: %d", high_score);
+        tft_setCursor(ILI9340_TFTWIDTH/ 2 - 40, ILI9340_TFTHEIGHT / 2 - 80);
+        tft_writeString(score_text);
+        tft_setTextColor(ILI9340_WHITE);
+        sprintf(score_text, "Score: %d", score);
+        tft_setCursor(ILI9340_TFTWIDTH/ 2 - 10, ILI9340_TFTHEIGHT / 2 - 40);
+        tft_writeString(score_text);
+    }
+    
 }
+
+void draw_background() {
+    for (int y = 0; y < grid_h; y++) {
+        for (int x = 0; x < grid_w; x++) {
+            uint16_t color = ((x + y) % 2 == 0)
+                ? ILI9340_GREEN
+                : ILI9340_LIGHTGREEN;
+            tft_fillRect(x * CELL_SIZE, y * CELL_SIZE,
+                         CELL_SIZE, CELL_SIZE, color);
+        }
+    }
+    tft_fillRect(0, playable_h,
+        screen_w, STATUS_PIXELS,
+        ILI9340_BLACK);
+}
+
+void draw_score() {
+    char buf[16];
+    sprintf(buf, "Score: %d", score);
+    tft_setTextColor(ILI9340_WHITE);
+    tft_setTextSize(2);
+    // position text inside that bottom 20 px
+    tft_setCursor(5, playable_h + 4);
+    tft_writeString(buf);
+  }
 
 // Initialize or restart the game.
 void init_game() {
     // Reset the score.
     score = 0;
     
-    // Clear the screen.
-    tft_fillScreen(ILI9340_BLACK);
-    
+    draw_background();
+    draw_score();
     // Set initial snake length and starting position (center of the grid).
     snake_length = 3;
-    int start_x = GRID_WIDTH / 2;
-    int start_y = GRID_HEIGHT / 2;
+    int start_x = grid_w / 2;
+    int start_y = grid_h / 2;
     for (int i = 0; i < snake_length; i++) {
         snake[i].x = start_x - i;  // Snake initially oriented horizontally.
         snake[i].y = start_y;
-        tft_fillRect(snake[i].x * CELL_SIZE, snake[i].y * CELL_SIZE, CELL_SIZE, CELL_SIZE, ILI9340_GREEN);
+        tft_fillRect(snake[i].x * CELL_SIZE, snake[i].y * CELL_SIZE, CELL_SIZE, CELL_SIZE, ILI9340_BLUE);
     }
     
     // Start moving to the right.
@@ -132,8 +230,8 @@ void init_game() {
 void spawn_food() {
     bool valid = false;
     while (!valid) {
-        food.x = rand() % GRID_WIDTH;
-        food.y = rand() % GRID_HEIGHT;
+        food.x = rand() % grid_w;
+        food.y = rand() % grid_h;
         valid = true;
         // Check the new food location against all snake segments.
         for (int i = 0; i < snake_length; i++) {
@@ -163,37 +261,138 @@ void process_input() {
     }
 }
 
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //Speaker
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-// play a square‑wave of given freq (Hz) for duration_ms
+
 void play_tone(uint pin, uint32_t freq, uint32_t duration_ms) {
     // 1) route the pin to PWM hardware
     gpio_set_function(pin, GPIO_FUNC_PWM);
     uint slice = pwm_gpio_to_slice_num(pin);
-
-    // 2) choose a clock divider so that (sys_clk / divider) / (wrap+1) = freq
-    //    sys_clk is 125 MHz by default on Pico
-    //    Let's pick divider = 125 so 1 MHz pwm_clk
     pwm_set_clkdiv(slice, 125.0f);
-
-    // 3) compute wrap so pwm_freq = 1 MHz / (wrap + 1) → wrap = 1 MHz/freq – 1
     uint32_t wrap = 1000000 / freq - 1;
     pwm_set_wrap(slice, wrap);
-
-    // 4) 50% duty cycle → level = wrap/2
     pwm_set_chan_level(slice, pwm_gpio_to_channel(pin), wrap/2);
-
-    // 5) enable PWM
     pwm_set_enabled(slice, true);
-
-    // 6) hold for the requested duration
     sleep_ms(duration_ms);
-
-    // 7) stop PWM and clean up
     pwm_set_enabled(slice, false);
     gpio_set_function(pin, GPIO_FUNC_SIO);
     gpio_put(pin, 0);
+}
+// configure PWM for a given freq, but don’t sleep
+void tone_start(uint pin, uint32_t freq) {
+    gpio_set_function(pin, GPIO_FUNC_PWM);
+    uint slice = pwm_gpio_to_slice_num(pin);
+    pwm_set_clkdiv(slice, 125.0f);  
+    uint32_t wrap = 1000000/freq - 1;
+    pwm_set_wrap(slice, wrap);
+    pwm_set_chan_level(slice, pwm_gpio_to_channel(pin), wrap/2);
+    pwm_set_enabled(slice, true);
+}
+// immediately silence the pin
+void tone_stop(uint pin) {
+    uint slice = pwm_gpio_to_slice_num(pin);
+    pwm_set_enabled(slice, false);
+    gpio_set_function(pin, GPIO_FUNC_SIO);
+    gpio_put(pin, 0);
+}
+
+
+bool bg_music_step(struct repeating_timer *t) {
+    // stop whatever’s playing right now
+    tone_stop(SPEAKER_PIN);
+
+    // advance (and wrap) the tune index
+    bg_note_index = (bg_note_index + 1) % 
+        (sizeof(background_tune)/sizeof(note_t));
+
+    // start the next note
+    tone_start(SPEAKER_PIN,
+               background_tune[bg_note_index].freq);
+
+    // and re‑schedule ourselves for that note’s duration
+    cancel_repeating_timer(&bg_timer);
+    add_repeating_timer_ms(
+        background_tune[bg_note_index].dur_ms,
+        bg_music_step, NULL, &bg_timer
+    );
+    return false;  // we manually re‑scheduled
+}
+void start_background_music() {
+    if (bg_playing) return;
+    bg_playing     = true;
+    bg_note_index  = -1;            // so first call jumps to index 0
+    bg_music_step(NULL);            // kick‑off immediately
+}
+
+// menu jingle step
+bool menu_step(struct repeating_timer *t) {
+    tone_stop(SPEAKER_PIN);
+    menu_idx = (menu_idx + 1) % menu_tune_len;
+    uint32_t f = menu_tune[menu_idx].freq;
+    if (f) tone_start(SPEAKER_PIN, f);
+    cancel_repeating_timer(&menu_timer);
+    add_repeating_timer_ms(menu_tune[menu_idx].dur_ms,
+                           menu_step, NULL, &menu_timer);
+    return false;
+  }
+  
+  // background jingle step
+  bool bg_step(struct repeating_timer *t) {
+    tone_stop(SPEAKER_PIN);
+    bg_idx = (bg_idx + 1) % background_tune_len;
+    uint32_t f = background_tune[bg_idx].freq;
+    if (f) tone_start(SPEAKER_PIN, f);
+    cancel_repeating_timer(&bg_timer);
+    add_repeating_timer_ms(background_tune[bg_idx].dur_ms,
+                           bg_step, NULL, &bg_timer);
+    return false;
+  }
+  
+
+void start_menu_music() {
+    if (menu_playing) return;
+    menu_playing = true;
+    menu_idx     = -1;
+    menu_step(NULL);    // see next section
+  }
+  
+  void stop_menu_music() {
+    if (!menu_playing) return;
+    menu_playing = false;
+    cancel_repeating_timer(&menu_timer);
+    tone_stop(SPEAKER_PIN);
+  }
+    
+
+
+void stop_background_music() {
+    if (!bg_playing) return;
+    bg_playing = false;
+    cancel_repeating_timer(&bg_timer);
+    tone_stop(SPEAKER_PIN);
+}
+
+void resume_background_music() {
+    if (bg_playing) return;
+    bg_playing = true;
+    // schedule the very next note immediately
+    add_repeating_timer_ms(0, bg_music_step, NULL, &bg_timer);
+}
+
+
+// Call this when the snake eats food for a quick descending jingle
+void play_eat_sound() {
+    // High to low, short pluck
+    play_tone(SPEAKER_PIN, 880, 40);   // A5
+    sleep_ms(15);
+    play_tone(SPEAKER_PIN, 660, 40);   // E5
+    sleep_ms(15);
+    play_tone(SPEAKER_PIN, 440, 80);   // A4
+
+    resume_background_music();
+
 }
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -229,34 +428,27 @@ void play_tone(uint pin, uint32_t freq, uint32_t duration_ms) {
 
 
 
-static GameState last_state = -1;
+
 // The screen‐manager thread on core 1
 static PT_THREAD (screen_pt(struct pt *pt)){
     PT_BEGIN(pt);
-
+    
     while (1) {
-        // Wait for a state change
-        PT_WAIT_UNTIL(pt, game_state != last_state);
+        if (game_state == STATE_START){
+            tft_fillScreen(ILI9340_BLACK);
+            tft_setTextColor(ILI9340_WHITE);
+            start_menu_music();
 
-        // Clear and draw static content for the new state
-        tft_fillScreen(ILI9340_BLACK);
-        tft_setTextColor(ILI9340_WHITE);
-        tft_setRotation(1);
-        if (game_state == STATE_START) {
             start_screen();
-        }
-        else if (game_state == STATE_END) {
-            end_screen();
-        }
-
-        last_state = game_state;
-
-        // Now blink the “press any button” line until state changes
-
-        tft_setTextSize(2);
-        while (game_state == last_state) {
-            if (game_state == STATE_START){
+            tft_setTextSize(2);
+            while(game_state == STATE_START){
                 tft_fillRect(ILI9340_TFTWIDTH / 2 -  60, ILI9340_TFTHEIGHT / 2-30, 300, 50, ILI9340_BLACK);
+                if(any_button_pressed()){
+                    game_state = STATE_PLAYING;
+                    stop_menu_music();
+                    play_tone(SPEAKER_PIN, 523, 100);
+                    break;
+                }
                 sleep_ms(1000);
                 tft_setCursor(ILI9340_TFTWIDTH / 2 -  55, ILI9340_TFTHEIGHT / 2-20);
                 tft_writeString("Press any button");
@@ -264,8 +456,25 @@ static PT_THREAD (screen_pt(struct pt *pt)){
                 tft_writeString("to start");
                 sleep_ms(1000);
             }
-            else if (game_state == STATE_END){
+        }
+        if (game_state == STATE_END){
+            stop_background_music();
+            stop_menu_music();
+            tft_fillScreen(ILI9340_BLACK);
+            tft_setTextColor(ILI9340_WHITE);
+            
+            end_screen();
+            tft_setTextSize(2);
+            while(game_state == STATE_END){
                 tft_fillRect(ILI9340_TFTWIDTH / 2 -  60, ILI9340_TFTHEIGHT / 2, 300, 50, ILI9340_BLACK);
+                if(any_button_pressed()){
+                    game_state = STATE_PLAYING;
+                    start_background_music();
+                    play_tone(SPEAKER_PIN, 523, 100);
+                    break;
+                }
+                
+                
                 sleep_ms(1000);
                 tft_setCursor(ILI9340_TFTWIDTH/ 2 - 55, ILI9340_TFTHEIGHT / 2 + 5);
                 tft_writeString("Press any button");
@@ -273,32 +482,28 @@ static PT_THREAD (screen_pt(struct pt *pt)){
                 tft_writeString("to restart");
                 sleep_ms(1000);
             }
-            
         }
-        
+        PT_YIELD_usec(100000);
+            
     }
-
+        
     PT_END(pt);
 }
 
 // --------------------------------------------------------------------
 // Protothread: game logic (input, snake movement, collision, drawing)
 // --------------------------------------------------------------------
+
 static PT_THREAD(game_thread(struct pt *pt)) {
     PT_BEGIN(pt);
-    tft_setRotation(0);
     while (1) {
-        // Wait for start state
-        PT_WAIT_UNTIL(pt, game_state == STATE_START);
-        // Wait for button press to begin
-        PT_WAIT_UNTIL(pt, any_button_pressed());
-        sleep_ms(100);    // debounce
-
-        init_game();               // initialize snake + food
-        game_state = STATE_PLAYING;
-
         // Game loop
         while (game_state == STATE_PLAYING) {
+            if (prev_state != game_state){
+                init_game(); 
+                start_background_music();
+                
+            }
             process_input();
             // compute new head
             Point nh = snake[0];
@@ -309,14 +514,18 @@ static PT_THREAD(game_thread(struct pt *pt)) {
                 case RIGHT: nh.x++; break;
             }
             // boundary collision
-            if (nh.x < 0 || nh.x >= GRID_WIDTH || nh.y < 0 || nh.y >= GRID_HEIGHT) {
+            if (nh.x < 0 || nh.x >= grid_w || nh.y < 0 || nh.y >= grid_h) {
                 game_state = STATE_END;
+                prev_state = STATE_END;
+                stop_background_music();
                 break;
             }
             // self-collision
             for (int i = 0; i < snake_length; i++) {
                 if (snake[i].x == nh.x && snake[i].y == nh.y) {
                     game_state = STATE_END;
+                    prev_state = STATE_END;
+                    stop_background_music();
                     break;
                 }
             }
@@ -330,23 +539,35 @@ static PT_THREAD(game_thread(struct pt *pt)) {
             } else {
                 // erase tail
                 Point tail = snake[snake_length-1];
-                tft_fillRect(tail.x*CELL_SIZE, tail.y*CELL_SIZE, CELL_SIZE, CELL_SIZE, ILI9340_BLACK);
+                uint16_t bg = ((tail.x + tail.y) % 2 == 0)
+                    ? ILI9340_GREEN
+                    : ILI9340_LIGHTGREEN;
+                tft_fillRect(
+                tail.x * CELL_SIZE,
+                tail.y * CELL_SIZE,
+                CELL_SIZE, CELL_SIZE,
+                bg            // restore checkerboard color
+                );
             }
             // shift body
             for (int i = snake_length-1; i>0; i--) snake[i] = snake[i-1];
             snake[0] = nh;
             // draw head
-            tft_fillRect(nh.x*CELL_SIZE, nh.y*CELL_SIZE, CELL_SIZE, CELL_SIZE, ILI9340_GREEN);
+            tft_fillRect(nh.x*CELL_SIZE, nh.y*CELL_SIZE, CELL_SIZE, CELL_SIZE, ILI9340_BLUE);
             // spawn + draw food
             if (ate) {
+                play_eat_sound();
                 spawn_food();
                 draw_food();
+                tft_fillRect(0, playable_h,
+                screen_w, STATUS_PIXELS,
+                ILI9340_BLACK);
+                draw_score();
             }
+            prev_state = game_state;
             sleep_ms(200);
         }
-        // STATE_END: wait for button to restart
-        PT_WAIT_UNTIL(pt, any_button_pressed());
-        game_state = STATE_START;
+        PT_YIELD_usec(100000);
     }
     PT_END(pt);
 }
@@ -364,13 +585,15 @@ int main() {
     stdio_init_all();
     tft_init_hw();
     tft_begin();
+    tft_setRotation(1);
+    calculate_grid();
     tft_fillScreen(ILI9340_BLACK);
     
     // Initialize button pins as inputs with internal pull-ups.
     gpio_init(BUTTON_UP);
     gpio_set_dir(BUTTON_UP, GPIO_IN);
     gpio_pull_up(BUTTON_UP);
-    
+
     gpio_init(BUTTON_DOWN);
     gpio_set_dir(BUTTON_DOWN, GPIO_IN);
     gpio_pull_up(BUTTON_DOWN);
@@ -387,6 +610,7 @@ int main() {
     srand(to_ms_since_boot(get_absolute_time()));
     // Start with the start screen.
     game_state = STATE_START;
+    prev_state = STATE_START;
     multicore_reset_core1();
     multicore_launch_core1(core1_entry);
     pt_add_thread(game_thread);
