@@ -13,6 +13,7 @@
 #include <pico/multicore.h>
 #include "pt_cornell_rp2040_v1_3.h"
 #include <hardware/gpio.h>
+#include "hardware/spi.h"
 
 // Snake Arena 
 #define CELL_SIZE 10
@@ -26,6 +27,71 @@
 #define BUTTON_RIGHT   9  //6
 #define BUTTON_DOWN    8  //9 
 #define SPEAKER_PIN   19    
+
+// FRAM (MB85RS64) SPI definitions
+#define FRAM_SPI        spi0
+#define FRAM_SCK_PIN    2
+#define FRAM_MOSI_PIN   3
+#define FRAM_MISO_PIN   4
+#define FRAM_CS_PIN     5
+
+// FRAM op-codes
+#define FRAM_WREN       0x06
+#define FRAM_WRITE      0x02
+#define FRAM_READ       0x03
+
+// Initialize SPI and CS pin
+static void fram_init(void) {
+    spi_init(FRAM_SPI, 2 * 1000 * 1000);              // 2 MHz
+    gpio_set_function(FRAM_SCK_PIN, GPIO_FUNC_SPI);
+    gpio_set_function(FRAM_MOSI_PIN, GPIO_FUNC_SPI);
+    gpio_set_function(FRAM_MISO_PIN, GPIO_FUNC_SPI);
+    gpio_init(FRAM_CS_PIN);
+    gpio_set_dir(FRAM_CS_PIN, GPIO_OUT);
+    gpio_put(FRAM_CS_PIN, 1);
+}
+
+// Assert/deassert CS
+static inline void fram_select(void)   { gpio_put(FRAM_CS_PIN, 0); }
+static inline void fram_deselect(void) { gpio_put(FRAM_CS_PIN, 1); }
+
+// Send WREN
+static void fram_write_enable(void) {
+    fram_select();
+    uint8_t cmd = FRAM_WREN;
+    spi_write_blocking(FRAM_SPI, &cmd, 1);
+    fram_deselect();
+}
+
+// Write `len` bytes from `buf` into FRAM at 16-bit address `addr`
+static void fram_write(uint16_t addr, const uint8_t *buf, size_t len) {
+    fram_write_enable();
+    uint8_t hdr[3] = {
+        FRAM_WRITE,
+        (uint8_t)(addr >> 8),
+        (uint8_t)(addr & 0xFF)
+    };
+    fram_select();
+    spi_write_blocking(FRAM_SPI, hdr, 3);
+    spi_write_blocking(FRAM_SPI, buf, len);
+    fram_deselect();
+}
+
+// Read `len` bytes into `buf` from FRAM at 16-bit address `addr`
+static void fram_read(uint16_t addr, uint8_t *buf, size_t len) {
+    uint8_t hdr[3] = {
+        FRAM_READ,
+        (uint8_t)(addr >> 8),
+        (uint8_t)(addr & 0xFF)
+    };
+    fram_select();
+    spi_write_blocking(FRAM_SPI, hdr, 3);
+    spi_read_blocking(FRAM_SPI, 0x00, buf, len);
+    fram_deselect();
+}
+
+
+
 
 // volatile flags set inside the ISR
 volatile bool up_pressed = false;
@@ -93,7 +159,7 @@ typedef enum {
 static GameState game_state;    // Game state variable
 static GameState prev_state;
 static int score = 0;           // Private variable to track the score
-static int high_score = 0;
+static int high_score;
 
 // Global game variables
 Point snake[MAX_SNAKE_LENGTH]; // Array holding positions of the snake segments
@@ -112,19 +178,33 @@ void end_screen();
 bool any_button_pressed();
 
 // Interrupt-driven input callback
+// void gpio_callback(uint gpio, uint32_t events) {
+//     // on falling edge
+//     if (gpio == BUTTON_UP && current_direction != DOWN)    current_direction = UP;
+//     if (gpio == BUTTON_DOWN && current_direction != UP)    current_direction = DOWN;
+//     if (gpio == BUTTON_LEFT && current_direction != RIGHT) current_direction = LEFT;
+//     if (gpio == BUTTON_RIGHT && current_direction != LEFT) current_direction = RIGHT;
+// }
+
+
 void gpio_callback(uint gpio, uint32_t events) {
-    // on falling edge
-    if (gpio == BUTTON_UP && current_direction != DOWN)    current_direction = UP;
-    if (gpio == BUTTON_DOWN && current_direction != UP)    current_direction = DOWN;
-    if (gpio == BUTTON_LEFT && current_direction != RIGHT) current_direction = LEFT;
-    if (gpio == BUTTON_RIGHT && current_direction != LEFT) current_direction = RIGHT;
+    // we only enabled EDGE_FALL, so gpio is low now
+    if (gpio == BUTTON_UP) {
+        up_pressed = true;
+    } else if (gpio == BUTTON_DOWN) {
+        down_pressed = true;
+    } else if (gpio == BUTTON_LEFT) {
+        left_pressed = true;
+    } else if (gpio == BUTTON_RIGHT) {
+        right_pressed = true;
+    }
 }
 
 // Helper: Return true if any button is pressed.
 bool any_button_pressed() {
-    return (!gpio_get(BUTTON_UP) || !gpio_get(BUTTON_DOWN) ||
-            !gpio_get(BUTTON_LEFT) || !gpio_get(BUTTON_RIGHT));
+    return up_pressed || down_pressed || left_pressed || right_pressed;
 }
+
 
 void calculate_grid() {
     screen_w    = tft_width();
@@ -155,6 +235,14 @@ void end_screen() {
     tft_setTextSize(2.5);
     if(score > high_score){
         high_score = score;
+
+        // persist to FRAM
+        uint8_t out[2] = {
+            (uint8_t)(high_score >> 8),
+            (uint8_t)(high_score & 0xFF)
+        };
+        fram_write(0x0000, out, 2);
+
         tft_setTextColor(ILI9340_RED);
         sprintf(score_text, "New High Score!");
         tft_setCursor(ILI9340_TFTWIDTH/ 2 - 50, ILI9340_TFTHEIGHT / 2 - 80);
@@ -250,15 +338,17 @@ void draw_food() {
 // Process button inputs to update the snake's movement direction.
 // Prevents reversal of direction.
 void process_input() {
-    if (!gpio_get(BUTTON_UP) && current_direction != DOWN) {
+    if (up_pressed && current_direction != DOWN) {
         current_direction = UP;
-    } else if (!gpio_get(BUTTON_DOWN) && current_direction != UP) {
+    } else if (down_pressed && current_direction != UP) {
         current_direction = DOWN;
-    } else if (!gpio_get(BUTTON_LEFT) && current_direction != RIGHT) {
+    } else if (left_pressed && current_direction != RIGHT) {
         current_direction = LEFT;
-    } else if (!gpio_get(BUTTON_RIGHT) && current_direction != LEFT) {
+    } else if (right_pressed && current_direction != LEFT) {
         current_direction = RIGHT;
     }
+    // clear flags so we only act once per press
+    up_pressed    = down_pressed = left_pressed = right_pressed = false;
 }
 
 
@@ -443,7 +533,13 @@ static PT_THREAD (screen_pt(struct pt *pt)){
             tft_setTextSize(2);
             while(game_state == STATE_START){
                 tft_fillRect(ILI9340_TFTWIDTH / 2 -  60, ILI9340_TFTHEIGHT / 2-30, 300, 50, ILI9340_BLACK);
-                if(any_button_pressed()){
+                if (any_button_pressed()) {
+                    // clear all the flags so we don’t immediately re-enter
+                    up_pressed    = false;
+                    down_pressed  = false;
+                    left_pressed  = false;
+                    right_pressed = false;
+            
                     game_state = STATE_PLAYING;
                     stop_menu_music();
                     play_tone(SPEAKER_PIN, 523, 100);
@@ -467,13 +563,18 @@ static PT_THREAD (screen_pt(struct pt *pt)){
             tft_setTextSize(2);
             while(game_state == STATE_END){
                 tft_fillRect(ILI9340_TFTWIDTH / 2 -  60, ILI9340_TFTHEIGHT / 2, 300, 50, ILI9340_BLACK);
-                if(any_button_pressed()){
+                if (any_button_pressed()) {
+                    // clear all the flags so we don’t immediately re-enter
+                    up_pressed    = false;
+                    down_pressed  = false;
+                    left_pressed  = false;
+                    right_pressed = false;
+            
                     game_state = STATE_PLAYING;
-                    start_background_music();
+                    stop_menu_music();
                     play_tone(SPEAKER_PIN, 523, 100);
                     break;
                 }
-                
                 
                 sleep_ms(1000);
                 tft_setCursor(ILI9340_TFTWIDTH/ 2 - 55, ILI9340_TFTHEIGHT / 2 + 5);
@@ -587,6 +688,13 @@ int main() {
     tft_begin();
     tft_setRotation(1);
     calculate_grid();
+    fram_init();
+
+    // read 2-byte high score from FRAM addr 0x0000
+    uint8_t hs_buf[2];
+    fram_read(0x0000, hs_buf, 2);
+    high_score = ((uint16_t)hs_buf[0] << 8) | hs_buf[1];
+
     tft_fillScreen(ILI9340_BLACK);
     
     // Initialize button pins as inputs with internal pull-ups.
@@ -606,6 +714,12 @@ int main() {
     gpio_set_dir(BUTTON_RIGHT, GPIO_IN);
     gpio_pull_up(BUTTON_RIGHT);
     
+    // register the SINGLE callback for all four pins
+    gpio_set_irq_enabled_with_callback(BUTTON_UP,    GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+    gpio_set_irq_enabled_with_callback(BUTTON_DOWN,  GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+    gpio_set_irq_enabled_with_callback(BUTTON_LEFT,  GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+    gpio_set_irq_enabled_with_callback(BUTTON_RIGHT, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
+
     // Seed the random number generator.
     srand(to_ms_since_boot(get_absolute_time()));
     // Start with the start screen.
