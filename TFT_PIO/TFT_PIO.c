@@ -17,10 +17,12 @@
 
 // Snake Arena 
 #define CELL_SIZE 10
-#define STATUS_PIXELS   20                     // height of score bar
+#define STATUS_PIXELS   20  // height of score bar
 #define GRID_WIDTH  (ILI9340_TFTWIDTH / CELL_SIZE)
 #define GRID_HEIGHT (ILI9340_TFTHEIGHT / CELL_SIZE)
 #define MAX_SNAKE_LENGTH (GRID_WIDTH * GRID_HEIGHT)
+#define MAX_FRUITS     5
+
 // Define GPIO pins for the direction buttons (adjust as needed for your wiring)
 #define BUTTON_UP      6  //7  
 #define BUTTON_LEFT    7  //8  
@@ -40,6 +42,10 @@
 #define FRAM_WRITE      0x02
 #define FRAM_READ       0x03
 
+
+
+
+////////////////////////////////////////////////////// AI GENERATED FRAM INTERFACE LIBRARY BELOW!!!! //////////////////////////////////////////////////////
 // Initialize SPI and CS pin
 static void fram_init(void) {
     spi_init(FRAM_SPI, 2 * 1000 * 1000);              // 2 MHz
@@ -89,46 +95,31 @@ static void fram_read(uint16_t addr, uint8_t *buf, size_t len) {
     spi_read_blocking(FRAM_SPI, 0x00, buf, len);
     fram_deselect();
 }
+//////////////////////////////////////////////////////// AI GENERATED  CODE ABOVE!!!! //////////////////////////////////////////////////////
 
-
-
-
-// volatile flags set inside the ISR
-volatile bool up_pressed = false;
-volatile bool left_pressed = false;
-volatile bool right_pressed = false;
-volatile bool down_pressed = false;
-
-// timers and indices
-static repeating_timer_t menu_timer, bg_timer;
-static int               menu_idx = -1, bg_idx = -1;
-static bool              menu_playing = false, bg_playing = false;
-
-static int screen_w, screen_h;
-static int playable_h, grid_w, grid_h;
-
-
-// Point structure to represent positions on the grid
-typedef struct {
-    int x;
-    int y;
-} Point;
-
+////////////////////////////////////////////////////// AI GENERATED SOUNDS BELOW!!!! //////////////////////////////////////////////////////
+/////////////////////////MUSIC SECTION//////////////////////////////
 typedef struct {
     uint32_t freq;      // in Hz; use 0 for a rest
     uint32_t dur_ms;    // duration in milliseconds
 } note_t;
 
 
-// background_tune[] & background_tune_len you defined earlier
-extern const int     background_tune_len;
-
 static const note_t background_tune[] = {
-    {262, 300},  // C4
-    {294, 300},  // D4
-    {330, 300},  // E4
-    {349, 300},  // F4
-    {392, 600},  // G4
+    {392, 120},  // G4
+    {311, 120},  // Eb4
+    {349, 120},  // F4
+    {311, 120},  // Eb4
+    {392, 120},  // G4
+    {415, 120},  // Ab4
+    {466, 120},  // Bb4
+    {523, 240},  // C5
+    {  0,  60},  // rest
+    {523, 120},  // C5
+    {466, 120},  // Bb4
+    {349, 120},  // F4
+    {311, 120},  // Eb4
+    {  0, 120},  // rest
 };
 
 static const note_t menu_tune[] = {
@@ -142,215 +133,14 @@ static const note_t menu_tune[] = {
     {523, 600},  // C5 hold
     {0,   200},  // rest before looping
 };
+
+extern const int     background_tune_len;
 static int bg_note_index = 0;
 static const int menu_tune_len = sizeof(menu_tune)/sizeof(menu_tune[0]);
-
-
-// Enum for the four movement directions.
-typedef enum {UP, DOWN, LEFT, RIGHT} Direction;
-
-// Enum for the overall game states.
-typedef enum {
-    STATE_START,   // Welcome screen
-    STATE_PLAYING, // Game in progress
-    STATE_END      // Game over screen
-} GameState;
-
-static GameState game_state;    // Game state variable
-static GameState prev_state;
-static int score = 0;           // Private variable to track the score
-static int high_score;
-
-// Global game variables
-Point snake[MAX_SNAKE_LENGTH]; // Array holding positions of the snake segments
-int snake_length;               // Current length of the snake
-Direction current_direction;    // The snake's current moving direction
-Point food;                     // Position of the food
-
-// Function prototypes
-void init_game();
-void spawn_food();
-void draw_food();
-void process_input();
-void run_game();
-void start_screen();
-void end_screen();
-bool any_button_pressed();
-
-// Interrupt-driven input callback
-// void gpio_callback(uint gpio, uint32_t events) {
-//     // on falling edge
-//     if (gpio == BUTTON_UP && current_direction != DOWN)    current_direction = UP;
-//     if (gpio == BUTTON_DOWN && current_direction != UP)    current_direction = DOWN;
-//     if (gpio == BUTTON_LEFT && current_direction != RIGHT) current_direction = LEFT;
-//     if (gpio == BUTTON_RIGHT && current_direction != LEFT) current_direction = RIGHT;
-// }
-
-
-void gpio_callback(uint gpio, uint32_t events) {
-    // we only enabled EDGE_FALL, so gpio is low now
-    if (gpio == BUTTON_UP) {
-        up_pressed = true;
-    } else if (gpio == BUTTON_DOWN) {
-        down_pressed = true;
-    } else if (gpio == BUTTON_LEFT) {
-        left_pressed = true;
-    } else if (gpio == BUTTON_RIGHT) {
-        right_pressed = true;
-    }
-}
-
-// Helper: Return true if any button is pressed.
-bool any_button_pressed() {
-    return up_pressed || down_pressed || left_pressed || right_pressed;
-}
-
-
-void calculate_grid() {
-    screen_w    = tft_width();
-    screen_h    = tft_height();
-    playable_h  = screen_h - STATUS_PIXELS;
-    grid_w      = screen_w  / CELL_SIZE;
-    grid_h      = playable_h / CELL_SIZE;
-  }
-
-// Display the start screen.
-void start_screen() {
-    tft_fillScreen(ILI9340_BLACK);
-    tft_setTextColor(ILI9340_WHITE);
-    tft_setTextSize(4);
-    // Centered title. Adjust cursor positions as needed.
-    tft_setCursor(ILI9340_TFTWIDTH/ 2 - 75, ILI9340_TFTHEIGHT / 2 - 80);
-    tft_writeString("Snake Game");
-}
-
-// Display the game over screen along with the final score.
-void end_screen() {
-    char score_text[32];
-    tft_fillScreen(ILI9340_BLACK);
-    tft_setTextColor(ILI9340_WHITE);
-    tft_setTextSize(4);
-    tft_setCursor(ILI9340_TFTWIDTH/ 2 - 65, ILI9340_TFTHEIGHT / 2 - 140);
-    tft_writeString("Game Over");
-    tft_setTextSize(2.5);
-    if(score > high_score){
-        high_score = score;
-
-        // persist to FRAM
-        uint8_t out[2] = {
-            (uint8_t)(high_score >> 8),
-            (uint8_t)(high_score & 0xFF)
-        };
-        fram_write(0x0000, out, 2);
-
-        tft_setTextColor(ILI9340_RED);
-        sprintf(score_text, "New High Score!");
-        tft_setCursor(ILI9340_TFTWIDTH/ 2 - 50, ILI9340_TFTHEIGHT / 2 - 80);
-        tft_writeString(score_text);
-        sprintf(score_text, "Score: %d", score);
-        tft_setCursor(ILI9340_TFTWIDTH/ 2 - 10, ILI9340_TFTHEIGHT / 2 - 40);
-        tft_writeString(score_text);
-        tft_setTextColor(ILI9340_WHITE);
-    }// Format the final score as a string.
-    else{
-        sprintf(score_text, "High Score: %d", high_score);
-        tft_setCursor(ILI9340_TFTWIDTH/ 2 - 40, ILI9340_TFTHEIGHT / 2 - 80);
-        tft_writeString(score_text);
-        tft_setTextColor(ILI9340_WHITE);
-        sprintf(score_text, "Score: %d", score);
-        tft_setCursor(ILI9340_TFTWIDTH/ 2 - 10, ILI9340_TFTHEIGHT / 2 - 40);
-        tft_writeString(score_text);
-    }
-    
-}
-
-void draw_background() {
-    for (int y = 0; y < grid_h; y++) {
-        for (int x = 0; x < grid_w; x++) {
-            uint16_t color = ((x + y) % 2 == 0)
-                ? ILI9340_GREEN
-                : ILI9340_LIGHTGREEN;
-            tft_fillRect(x * CELL_SIZE, y * CELL_SIZE,
-                         CELL_SIZE, CELL_SIZE, color);
-        }
-    }
-    tft_fillRect(0, playable_h,
-        screen_w, STATUS_PIXELS,
-        ILI9340_BLACK);
-}
-
-void draw_score() {
-    char buf[16];
-    sprintf(buf, "Score: %d", score);
-    tft_setTextColor(ILI9340_WHITE);
-    tft_setTextSize(2);
-    // position text inside that bottom 20 px
-    tft_setCursor(5, playable_h + 4);
-    tft_writeString(buf);
-  }
-
-// Initialize or restart the game.
-void init_game() {
-    // Reset the score.
-    score = 0;
-    
-    draw_background();
-    draw_score();
-    // Set initial snake length and starting position (center of the grid).
-    snake_length = 3;
-    int start_x = grid_w / 2;
-    int start_y = grid_h / 2;
-    for (int i = 0; i < snake_length; i++) {
-        snake[i].x = start_x - i;  // Snake initially oriented horizontally.
-        snake[i].y = start_y;
-        tft_fillRect(snake[i].x * CELL_SIZE, snake[i].y * CELL_SIZE, CELL_SIZE, CELL_SIZE, ILI9340_BLUE);
-    }
-    
-    // Start moving to the right.
-    current_direction = RIGHT;
-    
-    // Generate and draw the first food item.
-    spawn_food();
-    draw_food();
-}
-
-// Spawn food at a random grid location not occupied by the snake.
-void spawn_food() {
-    bool valid = false;
-    while (!valid) {
-        food.x = rand() % grid_w;
-        food.y = rand() % grid_h;
-        valid = true;
-        // Check the new food location against all snake segments.
-        for (int i = 0; i < snake_length; i++) {
-            if (snake[i].x == food.x && snake[i].y == food.y) {
-                valid = false;
-                break;
-            }
-        }
-    }
-}
-
-// Draw the food on the TFT display.
-void draw_food() {
-    tft_fillRect(food.x * CELL_SIZE, food.y * CELL_SIZE, CELL_SIZE, CELL_SIZE, ILI9340_RED);
-}
-// Process button inputs to update the snake's movement direction.
-// Prevents reversal of direction.
-void process_input() {
-    if (up_pressed && current_direction != DOWN) {
-        current_direction = UP;
-    } else if (down_pressed && current_direction != UP) {
-        current_direction = DOWN;
-    } else if (left_pressed && current_direction != RIGHT) {
-        current_direction = LEFT;
-    } else if (right_pressed && current_direction != LEFT) {
-        current_direction = RIGHT;
-    }
-    // clear flags so we only act once per press
-    up_pressed    = down_pressed = left_pressed = right_pressed = false;
-}
-
+// timers and indices
+static repeating_timer_t menu_timer, bg_timer;
+static int               menu_idx = -1, bg_idx = -1;
+static bool              menu_playing = false, bg_playing = false;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //Speaker
@@ -474,50 +264,286 @@ void resume_background_music() {
 
 // Call this when the snake eats food for a quick descending jingle
 void play_eat_sound() {
-    // High to low, short pluck
-    play_tone(SPEAKER_PIN, 880, 40);   // A5
-    sleep_ms(15);
-    play_tone(SPEAKER_PIN, 660, 40);   // E5
-    sleep_ms(15);
-    play_tone(SPEAKER_PIN, 440, 80);   // A4
+    // Eb6 → D6 → C6 → G#5, with tight decay
+    play_tone(SPEAKER_PIN, 1245, 50);  // Eb6
+    sleep_ms(25);
+    play_tone(SPEAKER_PIN, 1175, 50);  // D6
+    sleep_ms(25);
+    play_tone(SPEAKER_PIN, 1047, 60);  // C6
+    sleep_ms(30);
+    play_tone(SPEAKER_PIN, 830,  80);  // G#5
+    sleep_ms(40);
 
     resume_background_music();
-
 }
+
+void play_death_sound() {
+    // C5 → B4 → Bb4 → A4 → E4 → A2, with low rumble and final silence
+    play_tone(SPEAKER_PIN, 523,  80);  // C5 – sharp start
+    sleep_ms(40);
+    play_tone(SPEAKER_PIN, 493,  80);  // B4 – minor step down
+    sleep_ms(40);
+    play_tone(SPEAKER_PIN, 466,  80);  // Bb4 – tritone tension
+    sleep_ms(40);
+    play_tone(SPEAKER_PIN, 440, 120);  // A4 – settling
+    sleep_ms(60);
+    play_tone(SPEAKER_PIN, 330, 200);  // E4 – deeper drop
+    sleep_ms(100);
+    play_tone(SPEAKER_PIN, 110, 300);  // A2 – low rumble
+    sleep_ms(150);
+}
+
+////////////////////////////////////////////////////// AI GENERATED SOUNDS ABOVE!!!! //////////////////////////////////////////////////////
+
+
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
+//GAME BOARD
+//////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Point structure to represent positions on the grid
+typedef struct {
+    int x;
+    int y;
+} Point;
+
+static int screen_w, screen_h;
+static int playable_h, grid_w, grid_h;
+
+// Enum for the overall game states.
+typedef enum {
+    STATE_START,   // Welcome screen
+    STATE_PLAYING, // Game in progress
+    STATE_END      // Game over screen
+} GameState;
+
+static GameState game_state;    // Game state variable
+static GameState prev_state;
+static int score = 0;           // Private variable to track the score
+static int high_score;
+
+// Global game variables
+Point snake[MAX_SNAKE_LENGTH]; // Array holding positions of the snake segments
+int snake_length;               // Current length of the snake
 
 
 
 
+void calculate_grid() {
+    screen_w    = tft_width();
+    screen_h    = tft_height();
+    playable_h  = screen_h - STATUS_PIXELS;
+    grid_w      = screen_w  / CELL_SIZE;
+    grid_h      = playable_h / CELL_SIZE;
+  }
+
+// Display the start screen.
+void start_screen() {
+    tft_fillScreen(ILI9340_BLACK);
+    tft_setTextColor(ILI9340_WHITE);
+    tft_setTextSize(4);
+    // Centered title. Adjust cursor positions as needed.
+    tft_setCursor(ILI9340_TFTWIDTH/ 2 - 75, ILI9340_TFTHEIGHT / 2 - 80);
+    tft_writeString("Snake Game");
+}
+
+// Display the game over screen along with the final score.
+void end_screen() {
+    char score_text[32];
+    tft_fillScreen(ILI9340_BLACK);
+
+    if( score == MAX_SNAKE_LENGTH - 1){
+        tft_setTextColor(ILI9340_YELLOW);
+        tft_setTextSize(5);
+        tft_setCursor(ILI9340_TFTWIDTH/ 2 - 65, ILI9340_TFTHEIGHT / 2 - 140);
+        tft_writeString("VICTORY");
+        tft_setTextColor(ILI9340_WHITE);
+    }
+    else{
+        tft_setTextColor(ILI9340_WHITE);
+        tft_setTextSize(4);
+        tft_setCursor(ILI9340_TFTWIDTH/ 2 - 65, ILI9340_TFTHEIGHT / 2 - 140);
+        tft_writeString("Game Over");
+    }
+    
+
+    tft_setTextSize(2.5);
+    
+    if(score > high_score){
+        high_score = score;
+
+        // persist to FRAM
+        uint8_t out[2] = {
+            (uint8_t)(high_score >> 8),
+            (uint8_t)(high_score & 0xFF)
+        };
+        fram_write(0x0000, out, 2);
+
+        tft_setTextColor(ILI9340_RED);
+        sprintf(score_text, "New High Score!");
+        tft_setCursor(ILI9340_TFTWIDTH/ 2 - 50, ILI9340_TFTHEIGHT / 2 - 80);
+        tft_writeString(score_text);
+        sprintf(score_text, "Score: %d", score);
+        tft_setCursor(ILI9340_TFTWIDTH/ 2 - 20, ILI9340_TFTHEIGHT / 2 - 40);
+        tft_writeString(score_text);
+        tft_setTextColor(ILI9340_WHITE);
+    }// Format the final score as a string.
+    else{
+        sprintf(score_text, "High Score: %d", high_score);
+        tft_setCursor(ILI9340_TFTWIDTH/ 2 - 40, ILI9340_TFTHEIGHT / 2 - 80);
+        tft_writeString(score_text);
+        tft_setTextColor(ILI9340_WHITE);
+        sprintf(score_text, "Score: %d", score);
+        tft_setCursor(ILI9340_TFTWIDTH/ 2 - 10, ILI9340_TFTHEIGHT / 2 - 40);
+        tft_writeString(score_text);
+    }
+    
+}
+
+void draw_background() {
+    for (int y = 0; y < grid_h; y++) {
+        for (int x = 0; x < grid_w; x++) {
+            uint16_t color = ((x + y) % 2 == 0) ? ILI9340_GREEN : ILI9340_LIGHTGREEN;
+            tft_fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE, color);
+        }
+    }
+    tft_fillRect(0, playable_h, screen_w, STATUS_PIXELS,ILI9340_BLACK);
+}
+
+void draw_score() {
+    char buf[16];
+    sprintf(buf, "Score: %d", score);
+    tft_setTextColor(ILI9340_WHITE);
+    tft_setTextSize(2);
+    // position text inside that bottom 20 px
+    tft_setCursor(5, playable_h + 4);
+    tft_writeString(buf);
+}
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//FRUITS
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+static Point fruits[MAX_FRUITS];
+static int   current_fruits;
 
 
+static void spawn_one_fruit(Point *f) {
+    bool valid=false;
+    while(!valid){
+        f->x = rand()%grid_w;
+        f->y = rand()%grid_h;
+        valid=true;
+        // check snake
+        for(int i=0;i<snake_length;i++) if(snake[i].x == f->x && snake[i].y == f->y) {
+            valid=false;
+            break;
+        }
+        // check other fruits
+        for(int j=0;j<MAX_FRUITS && valid;j++){
+            if(&fruits[j] != f && fruits[j].x == f->x && fruits[j].y == f->y){
+                valid=false;
+            }
+        }
+    }
+}
+
+// Spawn food at a random grid location not occupied by the snake.
+static void spawn_all_fruits() {
+    for (int i = 0; i < MAX_FRUITS; i++) {
+        spawn_one_fruit(&fruits[i]);
+    }
+}
 
 
+static void draw_all_fruits() {
+    for (int i = 0; i < current_fruits; i++) {
+        tft_fillRect(fruits[i].x * CELL_SIZE, fruits[i].y * CELL_SIZE, CELL_SIZE, CELL_SIZE, ILI9340_RED);
+    }
+}
+
+// recompute how many fruits to show (1..MAX_FRUITS)
+static void update_fruit_count() {
+    current_fruits = 1 + ((MAX_FRUITS - 1) * (MAX_SNAKE_LENGTH - snake_length)) / MAX_SNAKE_LENGTH;
+}
 
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//Buttons
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Enum for the four movement directions.
+typedef enum {UP, DOWN, LEFT, RIGHT} Direction;
+Direction current_direction;    // The snake's current moving direction
+// volatile flags set inside the ISR
+volatile bool up_pressed = false;
+volatile bool left_pressed = false;
+volatile bool right_pressed = false;
+volatile bool down_pressed = false;
 
 
+void gpio_callback(uint gpio, uint32_t events) {
+    // we only enabled EDGE_FALL, so gpio is low now
+    if (gpio == BUTTON_UP) {
+        up_pressed = true;
+    } else if (gpio == BUTTON_DOWN) {
+        down_pressed = true;
+    } else if (gpio == BUTTON_LEFT) {
+        left_pressed = true;
+    } else if (gpio == BUTTON_RIGHT) {
+        right_pressed = true;
+    }
+}
 
+bool any_button_pressed() {
+    return up_pressed || down_pressed || left_pressed || right_pressed;
+}
 
+// Process button inputs to update the snake's movement direction.
+// Prevents reversal of direction.
+void process_input() {
+    if (up_pressed && current_direction != DOWN) {
+        current_direction = UP;
+    } else if (down_pressed && current_direction != UP) {
+        current_direction = DOWN;
+    } else if (left_pressed && current_direction != RIGHT) {
+        current_direction = LEFT;
+    } else if (right_pressed && current_direction != LEFT) {
+        current_direction = RIGHT;
+    }
+    // clear flags so we only act once per press
+    up_pressed    = down_pressed = left_pressed = right_pressed = false;
+}
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//Gameplay
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// Initialize or restart the game.
+void init_game() {
+    // Reset the score.
+    score = 0;
+    
+    draw_background();
+    draw_score();
+    // Set initial snake length and starting position (center of the grid).
+    snake_length = 3;
+    int start_x = grid_w / 2;
+    int start_y = grid_h / 2;
+    for (int i = 0; i < snake_length; i++) {
+        snake[i].x = start_x - i;  // Snake initially oriented horizontally.
+        snake[i].y = start_y;
+        tft_fillRect(snake[i].x * CELL_SIZE, snake[i].y * CELL_SIZE, CELL_SIZE, CELL_SIZE, ILI9340_BLUE);
+    }
+    
+    // Start moving to the right.
+    current_direction = RIGHT;
+    
+    // Generate and draw the first food item.
+    update_fruit_count();
+    spawn_all_fruits();
+    draw_all_fruits();
+}
 
 // The screen‐manager thread on core 1
 static PT_THREAD (screen_pt(struct pt *pt)){
@@ -545,12 +571,12 @@ static PT_THREAD (screen_pt(struct pt *pt)){
                     play_tone(SPEAKER_PIN, 523, 100);
                     break;
                 }
-                sleep_ms(1000);
+                sleep_ms(500);
                 tft_setCursor(ILI9340_TFTWIDTH / 2 -  55, ILI9340_TFTHEIGHT / 2-20);
                 tft_writeString("Press any button");
                 tft_setCursor(ILI9340_TFTWIDTH / 2 - 10, ILI9340_TFTHEIGHT / 2);
                 tft_writeString("to start");
-                sleep_ms(1000);
+                sleep_ms(500);
             }
         }
         if (game_state == STATE_END){
@@ -576,12 +602,12 @@ static PT_THREAD (screen_pt(struct pt *pt)){
                     break;
                 }
                 
-                sleep_ms(1000);
+                sleep_ms(500);
                 tft_setCursor(ILI9340_TFTWIDTH/ 2 - 55, ILI9340_TFTHEIGHT / 2 + 5);
                 tft_writeString("Press any button");
                 tft_setCursor(ILI9340_TFTWIDTH/ 2 - 15, ILI9340_TFTHEIGHT / 2 + 30);
                 tft_writeString("to restart");
-                sleep_ms(1000);
+                sleep_ms(500);
             }
         }
         PT_YIELD_usec(100000);
@@ -619,6 +645,7 @@ static PT_THREAD(game_thread(struct pt *pt)) {
                 game_state = STATE_END;
                 prev_state = STATE_END;
                 stop_background_music();
+                play_death_sound();
                 break;
             }
             // self-collision
@@ -627,51 +654,49 @@ static PT_THREAD(game_thread(struct pt *pt)) {
                     game_state = STATE_END;
                     prev_state = STATE_END;
                     stop_background_music();
+                    play_death_sound();
                     break;
                 }
             }
             if (game_state != STATE_PLAYING) break;
 
             // eat?
-            bool ate = (nh.x==food.x && nh.y==food.y);
-            if (ate) {
-                score++;
-                if (snake_length < MAX_SNAKE_LENGTH) snake_length++;
-            } else {
+            bool ate_any=false;
+            for(int i=0;i<current_fruits;i++){
+                if(nh.x==fruits[i].x && nh.y==fruits[i].y){
+                    ate_any=true; 
+                    score++; 
+                    if(snake_length<MAX_SNAKE_LENGTH) snake_length++;
+                    update_fruit_count(); 
+                    spawn_one_fruit(&fruits[i]);
+                    tft_fillRect(0,playable_h,screen_w,STATUS_PIXELS,ILI9340_BLACK);
+                    draw_score(); 
+                    draw_all_fruits(); 
+                    play_eat_sound();
+                    break;
+                }
+            }
+            if(!ate_any) {
                 // erase tail
-                Point tail = snake[snake_length-1];
-                uint16_t bg = ((tail.x + tail.y) % 2 == 0)
-                    ? ILI9340_GREEN
-                    : ILI9340_LIGHTGREEN;
-                tft_fillRect(
-                tail.x * CELL_SIZE,
-                tail.y * CELL_SIZE,
-                CELL_SIZE, CELL_SIZE,
-                bg            // restore checkerboard color
-                );
+                Point tail=snake[snake_length-1];
+                uint16_t bg=((tail.x+tail.y)%2==0)?ILI9340_GREEN:ILI9340_LIGHTGREEN;
+                tft_fillRect(tail.x*CELL_SIZE,tail.y*CELL_SIZE,CELL_SIZE,CELL_SIZE,bg);
             }
-            // shift body
-            for (int i = snake_length-1; i>0; i--) snake[i] = snake[i-1];
-            snake[0] = nh;
-            // draw head
-            tft_fillRect(nh.x*CELL_SIZE, nh.y*CELL_SIZE, CELL_SIZE, CELL_SIZE, ILI9340_BLUE);
-            // spawn + draw food
-            if (ate) {
-                play_eat_sound();
-                spawn_food();
-                draw_food();
-                tft_fillRect(0, playable_h,
-                screen_w, STATUS_PIXELS,
-                ILI9340_BLACK);
-                draw_score();
-            }
-            prev_state = game_state;
+            // shift & draw
+            for(int i=snake_length-1;i>0;i--) snake[i]=snake[i-1];
+            snake[0]=nh;
+            tft_fillRect(nh.x*CELL_SIZE,nh.y*CELL_SIZE,CELL_SIZE,CELL_SIZE,ILI9340_BLUE);
+            prev_state=game_state;
             sleep_ms(200);
         }
         PT_YIELD_usec(100000);
     }
     PT_END(pt);
 }
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
 
 // Core 1 entry
 void core1_entry() {
@@ -679,14 +704,12 @@ void core1_entry() {
     pt_schedule_start ;
 }
 
-
-
 int main() {
     // Initialize standard I/O and the TFT display.
     stdio_init_all();
     tft_init_hw();
     tft_begin();
-    tft_setRotation(1);
+    tft_setRotation(3);
     calculate_grid();
     fram_init();
 
