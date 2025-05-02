@@ -432,14 +432,15 @@ static void spawn_one_fruit(Point *f) {
         f->y = rand()%grid_h;
         valid=true;
         // check snake
-        for(int i=0;i<snake_length;i++) if(snake[i].x == f->x && snake[i].y == f->y) {
-            valid=false;
-            break;
+        for(int i=0;i<snake_length;i++) 
+            if(snake[i].x == f->x && snake[i].y == f->y) {
+                valid = false;
+                break;
         }
         // check other fruits
         for(int j=0;j<MAX_FRUITS && valid;j++){
             if(&fruits[j] != f && fruits[j].x == f->x && fruits[j].y == f->y){
-                valid=false;
+                valid = false;
             }
         }
     }
@@ -470,8 +471,9 @@ static void update_fruit_count() {
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Enum for the four movement directions.
 typedef enum {UP, DOWN, LEFT, RIGHT} Direction;
-Direction current_direction;    // The snake's current moving direction
-// volatile flags set inside the ISR
+Direction current_direction;    
+
+// Flags for ISR
 volatile bool up_pressed = false;
 volatile bool left_pressed = false;
 volatile bool right_pressed = false;
@@ -479,7 +481,6 @@ volatile bool down_pressed = false;
 
 
 void gpio_callback(uint gpio, uint32_t events) {
-    // we only enabled EDGE_FALL, so gpio is low now
     if (gpio == BUTTON_UP) {
         up_pressed = true;
     } else if (gpio == BUTTON_DOWN) {
@@ -550,13 +551,12 @@ static PT_THREAD (screen_pt(struct pt *pt)){
             tft_fillScreen(ILI9340_BLACK);
             tft_setTextColor(ILI9340_WHITE);
             start_menu_music();
-
             start_screen();
             tft_setTextSize(1);
+
             while(game_state == STATE_START){
                 tft_fillRect(ILI9340_TFTWIDTH / 2 -  60, ILI9340_TFTHEIGHT / 2-30, 300, 50, ILI9340_BLACK);
                 if (any_button_pressed()) {
-                    // clear all the flags so we don’t immediately re-enter
                     if (left_pressed){
                         cell_size = 20;
                     }
@@ -569,10 +569,14 @@ static PT_THREAD (screen_pt(struct pt *pt)){
                     else{
                         cell_size = 10;
                     }
+
+                    //Reset the flags
                     up_pressed    = false;
                     down_pressed  = false;
                     left_pressed  = false;
                     right_pressed = false;
+
+                    //Adjust grid based on difficulty
                     calculate_grid();
                     game_state = STATE_PLAYING;
                     stop_menu_music();
@@ -580,12 +584,14 @@ static PT_THREAD (screen_pt(struct pt *pt)){
                     break;
                     
                 }
+
                 sleep_ms(500);
                 tft_setCursor(ILI9340_TFTWIDTH / 2 -  32, ILI9340_TFTHEIGHT / 2-20);
                 tft_writeString("Left = Easy, Up = Normal");
                 tft_setCursor(ILI9340_TFTWIDTH / 2 - 40, ILI9340_TFTHEIGHT / 2);
                 tft_writeString("Right = Hard, Down = Insane");
                 sleep_ms(500);
+
             }
         }
         if (game_state == STATE_END){
@@ -593,18 +599,19 @@ static PT_THREAD (screen_pt(struct pt *pt)){
             stop_menu_music();
             tft_fillScreen(ILI9340_BLACK);
             tft_setTextColor(ILI9340_WHITE);
-            
             end_screen();
             tft_setTextSize(2);
+
             while(game_state == STATE_END){
                 tft_fillRect(ILI9340_TFTWIDTH / 2 -  60, ILI9340_TFTHEIGHT / 2, 300, 50, ILI9340_BLACK);
                 if (any_button_pressed()) {
-                    // clear all the flags so we don’t immediately re-enter
+                    // clear flags
                     up_pressed    = false;
                     down_pressed  = false;
                     left_pressed  = false;
                     right_pressed = false;
-            
+                    
+                    //bring us back to start menu so we can select new difficulty
                     game_state = STATE_START;
                     stop_menu_music();
                     play_tone(SPEAKER_PIN, 523, 100);
@@ -669,7 +676,7 @@ static PT_THREAD(game_thread(struct pt *pt)) {
             }
             if (game_state != STATE_PLAYING) break;
 
-            // eat?
+            // check if snake ate a fruit
             bool ate_any=false;
             for(int i=0;i<current_fruits;i++){
                 if(nh.x==fruits[i].x && nh.y==fruits[i].y){
@@ -685,6 +692,7 @@ static PT_THREAD(game_thread(struct pt *pt)) {
                     break;
                 }
             }
+
             if(!ate_any) {
                 // erase tail
                 Point tail=snake[snake_length-1];
@@ -692,8 +700,8 @@ static PT_THREAD(game_thread(struct pt *pt)) {
                 tft_fillRect(tail.x*cell_size,tail.y*cell_size,cell_size,cell_size,bg);
             }
             // shift & draw
-            for(int i=snake_length-1;i>0;i--) snake[i]=snake[i-1];
-            snake[0]=nh;
+            for(int i=snake_length-1; i>0 ;i--) snake[i] = snake[i-1];
+            snake[0] = nh;
             tft_fillRect(nh.x*cell_size,nh.y*cell_size,cell_size,cell_size,ILI9340_BLUE);
             prev_state=game_state;
             sleep_ms(200);
