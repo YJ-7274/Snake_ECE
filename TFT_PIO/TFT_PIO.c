@@ -322,7 +322,7 @@ int MAX_SNAKE_LENGTH;
 
 
 
-
+// dynamically calculattes the grid based on cell_size 
 void calculate_grid() {
     screen_w    = tft_width();
     screen_h    = tft_height();
@@ -395,7 +395,7 @@ void end_screen() {
     }
     
 }
-
+// draws a green/lightgreen checkerboard pattern playing grid
 void draw_background() {
     for (int y = 0; y < grid_h; y++) {
         for (int x = 0; x < grid_w; x++) {
@@ -405,7 +405,7 @@ void draw_background() {
     }
     tft_fillRect(0, playable_h, screen_w, STATUS_PIXELS,ILI9340_BLACK);
 }
-
+// generates a status bar that displays the score.
 void draw_score() {
     char buf[16];
     sprintf(buf, "Score: %d", score);
@@ -453,7 +453,7 @@ static void spawn_all_fruits() {
     }
 }
 
-
+// draws all fruits onto the map
 static void draw_all_fruits() {
     for (int i = 0; i < current_fruits; i++) {
         tft_fillRect(fruits[i].x * cell_size, fruits[i].y * cell_size, cell_size, cell_size, ILI9340_RED);
@@ -479,7 +479,7 @@ volatile bool left_pressed = false;
 volatile bool right_pressed = false;
 volatile bool down_pressed = false;
 
-
+//checks for which button press
 void gpio_callback(uint gpio, uint32_t events) {
     if (gpio == BUTTON_UP) {
         up_pressed = true;
@@ -556,6 +556,7 @@ static PT_THREAD (screen_pt(struct pt *pt)){
 
             while(game_state == STATE_START){
                 tft_fillRect(ILI9340_TFTWIDTH / 2 -  60, ILI9340_TFTHEIGHT / 2-30, 300, 50, ILI9340_BLACK);
+                // difficulty selection
                 if (any_button_pressed()) {
                     if (left_pressed){
                         cell_size = 20;

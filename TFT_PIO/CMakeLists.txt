@@ -24,6 +24,17 @@ pico_generate_pio_header(TFT_PIO ${CMAKE_CURRENT_LIST_DIR}/SPIPIO.pio)
 
 target_sources(TFT_PIO PRIVATE TFT_PIO.c TFTMaster.c glcdfont.c)
 
-target_link_libraries(TFT_PIO PRIVATE pico_stdlib hardware_gpio pico_time hardware_pio hardware_pwm hardware_irq)
+target_link_libraries(TFT_PIO PRIVATE 
+pico_stdlib 
+hardware_gpio 
+pico_time 
+hardware_pio 
+hardware_gpio
+hardware_pwm 
+hardware_irq
+hardware_sync
+pico_multicore
+hardware_spi
+)
 
 pico_add_extra_outputs(TFT_PIO)

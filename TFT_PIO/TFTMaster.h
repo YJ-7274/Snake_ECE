@@ -23,11 +23,17 @@
  #ifndef _TFT_MASTER_H_
  #define _TFT_MASTER_H_
  
- #define CS 12
- #define MOSI 14
- #define SCK 13
- #define DC 11
- #define RST 16
+//  #define CS 12 
+//  #define MOSI 14
+//  #define SCK 13
+//  #define DC 11
+//  #define RST 16
+
+ #define SCK 10
+ #define MOSI 11
+ #define CS 13
+ #define RST 18
+ #define DC 14
  
  #define ILI9340_TFTWIDTH  240
  #define ILI9340_TFTHEIGHT 320
@@ -100,6 +106,7 @@
  #define	ILI9340_BLACK   0x0000
  #define	ILI9340_BLUE    0x001F
  #define	ILI9340_RED     0xF800
+ #define ILI9340_LIGHTGREEN 0xAFE5
  #define	ILI9340_GREEN   0x07E0
  #define ILI9340_CYAN    0x07FF
  #define ILI9340_MAGENTA 0xF81F
@@ -149,5 +156,7 @@
  void tft_gfx_setRotation(unsigned char r);
  void tft_write(unsigned char c);
  void tft_writeString(char* str);
+ short tft_width(void);
+ short tft_height(void);
  
  #endif
